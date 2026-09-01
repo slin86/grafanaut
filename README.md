@@ -5,23 +5,23 @@ Supports dashboards, folders (with subfolders from Grafana 11+), data sources, ~
 
 ---
 
-## 🧩 Features
+## Features
 
-- 🔄 Backup, sync deletion and restore of:
+- Backup, sync deletion and restore of:
   - Dashboards
   - Folders (including nested subfolders)
   - Data sources
   - Other alarm resources could also be backuped, but not wanted yet
-- 🧱 Modular entity system with plugin-style registration
-- 📂 Subfolder support (Grafana 11+)
-- 🔧 Config-driven (define source and multiple target Grafana instances)
-- 💾 JSON-based backups, version-control friendly
-- 🧪 API transformations (e.g. remove `id`, fix payloads)
-- ✅ Python 3.8+
+- Modular entity system with plugin-style registration
+- Subfolder support (Grafana 11+)
+- Config-driven (define source and multiple target Grafana instances)
+- JSON-based backups, version-control friendly
+- API transformations (e.g. remove `id`, fix payloads)
+- Python 3.8+
 
 ---
 
-## 📦 Project Structure
+## Project Structure
 ```
 grafanaut/
 ├── config.yaml # Source + target Grafana instances
@@ -36,7 +36,7 @@ grafanaut/
 └── logger.py # Logger wrapper
 ```
 
-## 🧪 Requirements
+## Requirements
 - Python 3.7+
 - pip (for installing dependencies)
 - Access to a running Grafana instance with API access
@@ -44,7 +44,7 @@ grafanaut/
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Create a virtual environment & install dependencies
 
@@ -100,7 +100,7 @@ The restore command will read the backup files from the `backup_dir` and restore
 grafanaut --mode restore --source test --target qs prod
 ```
 
-## 🔒 Security Notes
+## Security Notes
 - All API tokens must have Admin privileges
 - Never commit config.yaml with real tokens
 - Git-ignore .tokens or .secrets if needed
