@@ -1,0 +1,137 @@
+stages:
+  - Backup
+  - Detect
+  - Mirror-Deletions
+  - Store
+  - Restore
+
+default:
+  image: python:3.11
+  before_script:
+    - echo "🔧 Installing dependencies..."
+    - python3 -m venv venv
+    - source venv/bin/activate
+    - pip3 install -r requirements.txt
+    - pip3 install -e .
+    - echo "✅ Python & dependencies installed"
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - echo  "$GITLAB_USER_EMAIL"
+    - echo  "$GITLAB_USER_NAME"
+    - git remote set-url --push origin "https://gitlab-ci-token:$CI_GITLAB_TOKEN@git.example.com/git/repo/with/grafanaut-pipeline" #TODO add here your repository with grafanaut-url
+    - echo "🔧 Git configured"
+
+.rules:schedule_or_web: &schedule_or_web
+  - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+    when: on_success
+  - when: never
+
+
+Backup Test:
+  stage: Backup
+  script:
+    - echo "Running backup for environment..."
+    - grafanaut --mode backup --source test
+  artifacts:
+    paths:
+      - backup/
+  rules: *schedule_or_web
+
+Backup QS:
+  stage: Backup
+  script:
+    - echo "Running backup for environment..."
+    - grafanaut --mode backup --source qs
+  artifacts:
+    paths:
+      - backup/
+  rules: *schedule_or_web
+
+Backup Prod:
+  stage: Backup
+  script:
+    - echo "Running backup for environment..."
+    - grafanaut --mode backup --source prod
+  artifacts:
+    paths:
+      - backup/
+  rules: *schedule_or_web
+
+Detect Changes:
+  stage: Detect
+  needs: ["Backup Test", "Backup QS", "Backup Prod"]
+  script:
+    - echo "🔎 Prüfe Änderungen …"
+    - git status --porcelain | tee git_status.txt
+    - |
+      if [ -s git_status.txt ]; then
+        echo "✅ Änderungen erkannt"
+      else
+        echo "ℹ️ Keine Änderungen"
+        curl -sS -o /dev/null -w "%{http_code}\n" \
+          -X POST -H "PRIVATE-TOKEN: $GITLAB_CI_API" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/cancel"
+      fi
+  artifacts:
+    expose_as: "Backup Git-Status"
+    paths:
+      - git_status.txt
+      - backup/
+  rules: *schedule_or_web
+
+Mirror Deletions:
+  stage: Mirror-Deletions
+  needs:
+    - job: "Detect Changes"
+      artifacts: true
+  script:
+      - echo "Mirroring deletions..."
+      - grafanaut --mode mirror-deletions --source test --target qs prod
+  artifacts:
+    paths:
+      - backup/
+  rules:
+    - *schedule_or_web
+    - when: manual
+
+Store Backup:
+  stage: Store
+  needs: ["Mirror Deletions"]
+  script:
+    - git add backup
+    - git add backup/*
+    - git status
+    - git commit -m "🔄 Grafana-Backup $(date +%F)" || echo "ℹ️ No changes to commit"
+    - git push origin HEAD:main
+  artifacts:
+    paths:
+      - backup/
+  rules:
+    - *schedule_or_web
+    - when: on_success
+
+Restore Test to QS:
+  stage: Restore
+  needs: ["Store Backup"]
+  script:
+    - echo "Restore test → qs"
+    - grafanaut --mode restore --source test --target qs
+  artifacts:
+    paths:
+      - backup/
+  rules:
+    - *schedule_or_web
+    - when: on_success
+
+Restore Test to Prod:
+  stage: Restore
+  needs: ["Store Backup"]
+  script:
+    - echo "Restore test → prod"
+    - grafanaut --mode restore --source test --target prod
+  artifacts:
+    paths:
+      - backup/
+  rules:
+    - *schedule_or_web
+    - when: on_success
