@@ -1,0 +1,6 @@
+.venv
+.idea
+grafanaut.egg-info
+venv
+git_status.txt
+git_changes.md

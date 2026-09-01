@@ -1,0 +1,12 @@
+# this is an example
+instances:
+  prod:
+    url: https://grafana.example.com
+    token: tokenstring
+  test:
+    url: https://grafana-test.example.com
+    token: tokenstring
+  qs:
+    url: https://grafana-qs.example.com
+    token: tokenstring
+backup_dir: /somewhere/in/git/grafana-backup
