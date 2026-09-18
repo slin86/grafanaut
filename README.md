@@ -1,107 +1,140 @@
-# Grafana Backup & Restore Tool
+# Grafanaut - Grafana Backup & Restore Tool
 
-A flexible, modular backup and restore tool for Grafana, designed to work across multiple instances.  
-Supports dashboards, folders (with subfolders from Grafana 11+), data sources, ~~alerting entities (contact points, policies, silences, rules)~~, and stores data in Git-compatible JSON structures.
+A modular backup and restore tool for Grafana, designed to keep several
+instances in sync. Supports dashboards, folders (including nested subfolders
+from Grafana 11+) and data sources, stored as git-friendly JSON.
 
 ---
 
 ## Features
 
-- Backup, sync deletion and restore of:
-  - Dashboards
-  - Folders (including nested subfolders)
-  - Data sources
-  - Other alarm resources could also be backuped, but not wanted yet
-- Modular entity system with plugin-style registration
-- Subfolder support (Grafana 11+)
-- Config-driven (define source and multiple target Grafana instances)
-- JSON-based backups, version-control friendly
-- API transformations (e.g. remove `id`, fix payloads)
-- Python 3.8+
+- Backup, deletion mirroring and restore of dashboards, folders and data sources
+- Full nested folder support: the whole tree is walked, including empty folders
+- Renames and re-parenting of both folders and dashboards are propagated
+- Synced folders are locked read-only in the targets and visibly marked
+- Config-driven (one source, several targets)
+- `--dry-run` for previewing a run
+- Non-zero exit code when anything failed, so CI turns red
 
 ---
-
-## Project Structure
-```
-grafanaut/
-├── config.yaml # Source + target Grafana instances
-├── base-entity.py # Base class for all entities
-├── entities/ # Python files per entity (modular)
-│ ├── folders.py
-│ ├── dashboards.py
-│ ├── datasources.py
-│ └── alert-rules.py
-├── main.py # Entry point for backup/restore
-├── http_client.py # HTTP client for Grafana API
-└── logger.py # Logger wrapper
-```
 
 ## Requirements
-- Python 3.7+
-- pip (for installing dependencies)
-- Access to a running Grafana instance with API access
 
+- Python 3.9+
+- A Grafana instance per stage with an admin API token
+- Grafana 11+ if you use nested folders
 
 ---
 
-## Quick Start
+## Quick start
 
-### 1. Create a virtual environment & install dependencies
+### 1. Install
 
 ```bash
-python3 -m venv venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip3 install -r requirements.txt 
-pip3 install -e .
+pip install -r requirements.txt
+pip install -e .
 ```
 
-### 2. Create a config.yaml file
+### 2. Create config.yaml
 
-You need grafana API tokens with admin privileges for each instance. You also could set token via environment variables.
-To do so, you need to set GRAFANA_TOKEN_PROD, GRAFANA_TOKEN_QS, GRAFANA_TOKEN_TEST.
+Tokens need admin privileges. They can also come from the environment:
+`GRAFANA_TOKEN_PROD`, `GRAFANA_TOKEN_QS`, `GRAFANA_TOKEN_TEST` (the env
+variable wins over the config file).
 
-```yaml
-instances:
-  prod:
-    url: https://grafana.geofox.de
-    token: [REDACTED]
-  test:
-    url: https://grafana-test.geofox.de
-    token: [REDACTED]
-  qs:
-    url: https://grafana-qs.geofox.de
-    token: [REDACTED]
-backup_dir: ../backup
-```
+See `config.yaml` in this repository for a commented example. The path can be
+overridden with `--config` or the `GRAFANAUT_CONFIG` environment variable.
 
-### 3. Run the backup command
-
-The backup command will create a directory structure in the `backup_dir` defined in your config.yaml file.
+### 3. Backup
 
 ```bash
 grafanaut --mode backup --source test
-grafanaut --mode backup --source qs
-grafanaut --mode backup --source prod
 ```
 
-### 4. Mirror-Deletions ausführen
+Writes `<backup_dir>/test/{folder,dashboards,datasource}/<uid>.json`.
+File names are the uid, never the title, so a rename updates a file instead of
+creating a second one.
 
-The `mirror-deletions` mode ensures that entities which deleted in the source also deleted in the target. Dashboards created in Target will not be deleted.
+### 4. Mirror deletions
 
 ```bash
-grafanaut --mode mirror-deletions --source test --target qs prod
+grafanaut --mode mirror-deletions --source test --targets qs prod
 ```
 
-### 5. Run the restore command
+Objects that still have a backup file but no longer exist in the source were
+deleted since the last run, so they are deleted in the targets as well and the
+backup file is removed. Dashboards are processed before folders, because
+deleting a folder in Grafana cascades into everything inside it.
 
-The restore command will read the backup files from the `backup_dir` and restore them to the target Grafana instance(s).
+### 5. Restore
 
 ```bash
-grafanaut --mode restore --source test --target qs prod
+grafanaut --mode restore --source test --targets qs prod
 ```
 
-## Security Notes
-- All API tokens must have Admin privileges
-- Never commit config.yaml with real tokens
-- Git-ignore .tokens or .secrets if needed
+Add `--dry-run` to any mode to see what would happen without writing.
 
+---
+
+## Sync protection
+
+Synced content should not be edited in the target instances, so grafanaut
+applies two things on every restore. Both are configured under `sync:` in
+`config.yaml`.
+
+### Locking (`lock_folders: true`)
+
+Grafana has no per-dashboard "read only" flag that leaves editing intact, so
+protection is applied at folder level. For every synced folder the Viewer and
+Editor roles are set to `View` (permission level 1) via
+`POST /api/folders/:uid/permissions`. Result in the UI:
+
+- the save button on dashboards inside the folder is gone
+- dashboards cannot be created in or deleted from the folder
+- viewing and exporting the dashboard JSON still works
+
+Existing per-user and per-team grants are read first and carried over with
+their level capped at `View`, instead of being wiped by the replacing POST.
+
+Two limitations come from Grafana itself:
+
+- **Admins are never restricted.** Grafana does not allow setting permissions
+  for admins, they always have access to everything.
+- **Alert rules are not covered.** There is an open Grafana issue where a
+  folder set to View still allows editors to create and edit alert rules in
+  that folder.
+
+To let users still edit panels temporarily without being able to save, set in
+`grafana.ini` on each target:
+
+```ini
+[users]
+viewers_can_edit = true
+```
+
+This is a server setting and cannot be applied through the API.
+
+### Marking
+
+So a synced folder stays recognisable even where locking does not apply
+(admins, alert rules), synced objects are marked:
+
+- folder title gets a suffix (default `" [synced]"`)
+- folder description is set to a sync notice
+- every restored dashboard gets a tag (default `synced:<source>`)
+
+All three are idempotent and can be disabled individually by setting them to
+an empty value. The marking is applied in the target only, the backup files
+keep the original titles and tags from the source.
+
+---
+
+## Security notes
+
+- API tokens need admin privileges
+- Never commit `config.yaml` with real tokens
+- Data source backups contain no secrets (the API never returns
+  `secureJsonData`). Updating an existing data source keeps its stored
+  credentials, but a data source created for the first time in a fresh target
+  needs its credentials provisioned separately.

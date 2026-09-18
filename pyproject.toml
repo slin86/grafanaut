@@ -1,17 +1,19 @@
 [project]
 name = "grafanaut"
-version = "0.1.0"
-description = "Modulares Backup- und Restore-Tool für Grafana via REST API"
+version = "0.2.0"
+description = "Modular backup and restore tool for Grafana via the REST API"
 authors = [
-    { name = "Nils Holthues", email = "nils.holthues@akra.de" }
+    { name = "Nils Holthues" }
 ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31.0",
-    "PyYAML>=6.0.1",
-    "python-dotenv>=1.0.1"
+    "PyYAML>=6.0.1"
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
 
 [project.scripts]
 grafanaut = "grafanaut.__main__:main"
@@ -20,5 +22,7 @@ grafanaut = "grafanaut.__main__:main"
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["grafanaut"]
+[tool.setuptools.packages.find]
+# The explicit list previously missed grafanaut.entities, so a non-editable
+# install produced a broken package.
+include = ["grafanaut*"]

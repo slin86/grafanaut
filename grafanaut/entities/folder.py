@@ -1,29 +1,74 @@
+"""Folder resource, including nested folders (Grafana 11+)."""
+
+from __future__ import annotations
+
 from grafanaut.base_entity import BaseEntity
+from grafanaut.logger import setup_logger
+from grafanaut.sync_policy import VIEW
+
+logger = setup_logger(__name__)
 
 NAME = "folder"
 ENDPOINT = "/api/folders"
+PAGE_SIZE = 1000
+LOCKED_ROLES = ("Viewer", "Editor")
+
 
 class FolderResource(BaseEntity):
-    def load_entities(self, client):
-        folder = client.get("/api/search?query=&type=dash-db")
-        entities = []
 
-        for item in folder:
-            if 'folderUid' not in item:
-                continue
-            detail = client.get(f"/api/folders/{item['folderUid']}")
-            entities.append({
-                "title": detail['title'],
-                "uid": detail['uid'],
-                "parentUid": detail.get('parentUid'), # This value is nullable for root folders
-            })
+    # ------------------------------------------------------------------
+    # backup
+    # ------------------------------------------------------------------
+    def load_entities(self, client):
+        """Walk the entire folder tree breadth-first.
+
+        The old implementation derived folders from the dashboard search
+        (/api/search?type=dash-db), so a folder only existed if it directly
+        contained a dashboard. Empty folders, folders holding only subfolders
+        and intermediate levels of a nested path were all invisible.
+
+        GET /api/folders returns only the immediate children of the given
+        parent (root level when parentUid is omitted), so one request per
+        level is required.
+        """
+        entities, queue, seen = [], [None], set()
+        while queue:
+            parent_uid = queue.pop(0)
+            for item in self._list_children(client, parent_uid):
+                uid = item["uid"]
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                entities.append({
+                    "uid": uid,
+                    "title": item["title"],
+                    "parentUid": parent_uid,
+                    "description": item.get("description", ""),
+                })
+                queue.append(uid)
         return entities
 
+    @staticmethod
+    def _list_children(client, parent_uid):
+        page, children = 1, []
+        while True:
+            path = f"{ENDPOINT}?limit={PAGE_SIZE}&page={page}"
+            if parent_uid is not None:
+                path += f"&parentUid={parent_uid}"
+            batch = client.get(path)
+            children.extend(batch)
+            if len(batch) < PAGE_SIZE:
+                return children
+            page += 1
+
+    # ------------------------------------------------------------------
+    # identity
+    # ------------------------------------------------------------------
+    def entity_id(self, entity):
+        return entity["uid"]
+
     def entity_name(self, entity):
-        # Magic to load root folders first
-        if entity['parentUid'] is None:
-            return f"0_root_{entity['title']}_{entity['uid']}"
-        return f"1_nested_{entity['title']}_{entity['uid']}"
+        return entity.get("title", entity["uid"])
 
     def name(self):
         return NAME
@@ -31,9 +76,151 @@ class FolderResource(BaseEntity):
     def endpoint(self):
         return ENDPOINT
 
-    def convert(self, data):
-        data['overwrite'] = True
-        return data
-
     def get_entity_path(self, entity):
         return f"{ENDPOINT}/{entity['uid']}"
+
+    def delete_path(self, entity):
+        # Without forceDeleteRules the API returns 400 as soon as any alert
+        # rule lives in the folder.
+        return f"{self.get_entity_path(entity)}?forceDeleteRules=true"
+
+    # ------------------------------------------------------------------
+    # ordering
+    # ------------------------------------------------------------------
+    def restore_order(self, entities):
+        """Parents before children, at any depth.
+
+        The old scheme encoded the order in the file name ('0_root_...',
+        '1_nested_...'), which only distinguished root from non-root. A level-3
+        folder could be created before its level-2 parent, and the API then
+        rejects the unknown parentUid.
+        """
+        by_uid = {e["uid"]: e for e in entities}
+
+        def depth(entity):
+            level, seen, current = 0, set(), entity
+            while current is not None and current.get("parentUid"):
+                if current["uid"] in seen:
+                    logger.error(f"Cycle in folder hierarchy at {current['uid']}")
+                    break
+                seen.add(current["uid"])
+                current = by_uid.get(current["parentUid"])
+                level += 1
+            return level
+
+        return sorted(entities, key=lambda e: (depth(e), e.get("title", "")))
+
+    def deletion_order(self, entities):
+        # Deepest first, so a child is removed before its parent.
+        return list(reversed(self.restore_order(entities)))
+
+    # ------------------------------------------------------------------
+    # restore
+    # ------------------------------------------------------------------
+    def make_update(self, client, entity, ctx):
+        desired = ctx.policy.decorate_folder(entity, ctx.source)
+        path = self.get_entity_path(desired)
+
+        if client.exists(path):
+            current = client.get(path)
+            self._rename(client, path, current, desired, ctx)
+            self._move(client, path, current, desired, ctx)
+        else:
+            self._create(client, desired, ctx)
+
+        if ctx.policy.lock_folders:
+            self._lock(client, desired, ctx)
+
+    def _create(self, client, desired, ctx):
+        logger.info(f"\t -> creating folder: {desired['title']}")
+        if ctx.dry_run:
+            return
+        payload = {"uid": desired["uid"], "title": desired["title"]}
+        if desired.get("parentUid"):
+            payload["parentUid"] = desired["parentUid"]
+        if desired.get("description"):
+            payload["description"] = desired["description"]
+        body, response = client.post(ENDPOINT, payload)
+        self.check(response, body, desired, "creating")
+
+    def _rename(self, client, path, current, desired, ctx):
+        same_title = current.get("title") == desired["title"]
+        same_description = (current.get("description") or "") == (desired.get("description") or "")
+        if same_title and same_description:
+            return
+        logger.info(f"\t -> updating folder: {current.get('title')} -> {desired['title']}")
+        if ctx.dry_run:
+            return
+        payload = {"title": desired["title"], "overwrite": True}
+        if desired.get("description"):
+            payload["description"] = desired["description"]
+        body, response = client.put(path, payload)
+        self.check(response, body, desired, "renaming")
+
+    def _move(self, client, path, current, desired, ctx):
+        """PUT /api/folders/:uid ignores parentUid -- moving is a separate
+        endpoint (POST /api/folders/:uid/move). This is why re-parenting a
+        folder previously did nothing at all."""
+        current_parent = current.get("parentUid") or None
+        desired_parent = desired.get("parentUid") or None
+        if current_parent == desired_parent:
+            return
+        logger.info(
+            f"\t -> moving folder {desired['title']}: "
+            f"{current_parent or 'root'} -> {desired_parent or 'root'}"
+        )
+        if ctx.dry_run:
+            return
+        body, response = client.post(f"{path}/move", {"parentUid": desired_parent or ""})
+        self.check(response, body, desired, "moving")
+
+    # ------------------------------------------------------------------
+    # lockdown
+    # ------------------------------------------------------------------
+    def _lock(self, client, desired, ctx):
+        """Downgrade write access on a synced folder to read-only.
+
+        Effect in the UI: no save button on the dashboards inside, and no
+        creating or deleting dashboards in the folder. Admins are unaffected,
+        Grafana does not allow restricting them.
+
+        POST replaces the whole permission list, so existing user/team grants
+        are read first and carried over with their level capped at View
+        instead of being wiped.
+        """
+        uid = desired["uid"]
+        try:
+            current = client.get(f"{ENDPOINT}/{uid}/permissions")
+        except Exception as exc:  # noqa: BLE001 - lockdown must not abort the sync
+            logger.error(f"\t\tCould not read permissions of folder {uid}: {exc}")
+            return
+
+        items, changed = [], False
+        for permission in current:
+            level = permission.get("permission", 0)
+            if level > VIEW:
+                level = VIEW
+                changed = True
+            item = {"permission": level}
+            if permission.get("userId"):
+                item["userId"] = permission["userId"]
+            elif permission.get("teamId"):
+                item["teamId"] = permission["teamId"]
+            elif permission.get("role"):
+                item["role"] = permission["role"]
+            else:
+                continue
+            items.append(item)
+
+        for role in LOCKED_ROLES:
+            if not any(i.get("role") == role for i in items):
+                items.append({"role": role, "permission": VIEW})
+                changed = True
+
+        if not changed:
+            return
+        logger.info(f"\t -> locking folder (read-only for non-admins): {desired['title']}")
+        if ctx.dry_run:
+            return
+        body, response = client.post(f"{ENDPOINT}/{uid}/permissions", {"items": items})
+        self.check(response, body, desired, "locking")

@@ -86,7 +86,7 @@ Mirror Deletions:
       artifacts: true
   script:
       - echo "Mirroring deletions..."
-      - grafanaut --mode mirror-deletions --source test --target qs prod
+      - grafanaut --mode mirror-deletions --source test --targets qs prod
   artifacts:
     paths:
       - backup/
@@ -115,7 +115,7 @@ Restore Test to QS:
   needs: ["Store Backup"]
   script:
     - echo "Restore test → qs"
-    - grafanaut --mode restore --source test --target qs
+    - grafanaut --mode restore --source test --targets qs
   artifacts:
     paths:
       - backup/
@@ -128,7 +128,7 @@ Restore Test to Prod:
   needs: ["Store Backup"]
   script:
     - echo "Restore test → prod"
-    - grafanaut --mode restore --source test --target prod
+    - grafanaut --mode restore --source test --targets prod
   artifacts:
     paths:
       - backup/

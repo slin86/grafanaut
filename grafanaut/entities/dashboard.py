@@ -1,24 +1,43 @@
-import json
-import os
+"""Dashboard resource."""
+
+from __future__ import annotations
 
 from grafanaut.base_entity import BaseEntity
 from grafanaut.logger import setup_logger
 
 logger = setup_logger(__name__)
+
 NAME = "dashboards"
 ENDPOINT_POST = "/api/dashboards/db"
+PAGE_SIZE = 1000
+
 
 class DashboardResource(BaseEntity):
+
     def load_entities(self, client):
-        dashboards = client.get("/api/search?query=&type=dash-db")
-        entities = []
-        for item in dashboards:
-            uid = item['uid']
-            entities.append(client.get(f"/api/dashboards/uid/{uid}"))
-        return entities
+        return [
+            client.get(f"/api/dashboards/uid/{item['uid']}")
+            for item in self._search(client)
+        ]
+
+    @staticmethod
+    def _search(client):
+        """/api/search is capped at 1000 results, so page through it."""
+        page, found = 1, []
+        while True:
+            batch = client.get(
+                f"/api/search?query=&type=dash-db&limit={PAGE_SIZE}&page={page}"
+            )
+            found.extend(batch)
+            if len(batch) < PAGE_SIZE:
+                return found
+            page += 1
+
+    def entity_id(self, entity):
+        return entity["dashboard"]["uid"]
 
     def entity_name(self, entity):
-        return f"{entity['dashboard']['title']}_{entity['dashboard']['uid']}"
+        return entity["dashboard"].get("title", self.entity_id(entity))
 
     def name(self):
         return NAME
@@ -26,35 +45,48 @@ class DashboardResource(BaseEntity):
     def endpoint(self):
         return ENDPOINT_POST
 
-    def convert(self, data):
-        data['dashboard']['id'] = None
+    def get_entity_path(self, entity):
+        return f"/api/dashboards/uid/{self.entity_id(entity)}"
+
+    def sanitize(self, entity):
+        """Keep only what a restore needs. Dropping id/version stops the
+        backup from churning in git on every save in the source."""
+        dashboard = dict(entity["dashboard"])
+        dashboard.pop("id", None)
+        dashboard.pop("version", None)
+        meta = entity.get("meta") or {}
         return {
-            "dashboard": data["dashboard"],
-            "folderUid": data["meta"]["folderUid"],
-            "overwrite": True
+            "dashboard": dashboard,
+            "meta": {
+                "folderUid": meta.get("folderUid") or "",
+                "folderTitle": meta.get("folderTitle") or "",
+            },
         }
 
-    def get_entity_path(self, entity):
-        return f"/api/dashboards/uid/{entity['dashboard']['uid']}"
+    def convert(self, data):
+        dashboard = dict(data["dashboard"])
+        dashboard["id"] = None
+        meta = data.get("meta") or {}
+        return {
+            "dashboard": dashboard,
+            # Root level dashboards have no folderUid in meta at all -- the
+            # previous direct key access raised KeyError and aborted the whole
+            # dashboard restore from that file onwards.
+            "folderUid": meta.get("folderUid") or "",
+            "overwrite": True,
+        }
 
-    def make_update(self, client, entity):
-        logger.info(f"\t -> creating {self.name()}: {self.entity_name(entity)}")
-        body, response = client.post(self.endpoint(), entity)
-        if response.status_code > 399:
-            logger.error(f"\t\tError restoring {self.name()} {self.entity_name(entity)}: {response.status_code}: {body}")
-
-    def diff_local_and_online(self, client, backup_dir):
-        folder = os.path.join(backup_dir, self.name())
-        if not os.path.exists(folder):
-            logger.error(f"Backup folder {folder} does not exist")
+    def make_update(self, client, entity, ctx):
+        """Always POST. /api/dashboards/db creates or updates by uid, and
+        moving between folders is done by sending a different folderUid with
+        overwrite=true."""
+        payload = dict(entity)
+        payload["dashboard"] = ctx.policy.decorate_dashboard(
+            dict(entity["dashboard"]), ctx.source
+        )
+        payload["message"] = f"grafanaut sync from {ctx.source}"
+        logger.info(f"\t -> restoring {self.name()}: {self.entity_name(entity)}")
+        if ctx.dry_run:
             return
-        entities = []
-        for filename in sorted(os.listdir(folder)):
-            with open(os.path.join(folder, filename)) as f:
-                entity = self.convert(json.load(f))
-                entity_path = self.get_entity_path(entity)
-                if not client.exists(entity_path):
-                    entities.append(entity)
-        if entities:
-            logger.info(f"\t{len(entities)} deleted {self.name()} found")
-        return entities
+        body, response = client.post(self.endpoint(), payload)
+        self.check(response, body, entity, "restoring")

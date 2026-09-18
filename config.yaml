@@ -1,4 +1,4 @@
-# this is an example
+# Example configuration - copy and fill in. Never commit real tokens.
 instances:
   prod:
     url: https://grafana.example.com
@@ -9,4 +9,22 @@ instances:
   qs:
     url: https://grafana-qs.example.com
     token: tokenstring
+
+# Root directory for the JSON backups. Each source gets its own subdirectory.
 backup_dir: /somewhere/in/git/grafana-backup
+
+# How synced objects are marked and protected in the target instances.
+sync:
+  # Downgrade the Viewer and Editor roles to View on every synced folder.
+  # Effect: no save button on the dashboards inside, and no creating or
+  # deleting dashboards in the folder. Admins are never restricted by Grafana.
+  # For users to still be able to edit without saving, set
+  #   [users] viewers_can_edit = true
+  # in grafana.ini on the target instances.
+  lock_folders: true
+
+  # Visible markers. Set to an empty value to disable a single one.
+  # {source} is replaced with the source instance name.
+  folder_title_suffix: " [synced]"
+  folder_description: "Managed by grafanaut, synced from {source}. Local changes are overwritten."
+  dashboard_tag: "synced:{source}"
