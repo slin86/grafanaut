@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from urllib.parse import quote
 
 from grafanaut import changes
 from grafanaut.base_entity import BaseEntity
@@ -12,7 +12,6 @@ logger = setup_logger(__name__)
 
 # Fields Grafana maintains itself, never a reason to push a new version.
 VOLATILE_FIELDS = {"id", "version"}
-MAX_REPORTED_FIELDS = 5
 
 NAME = "dashboards"
 ENDPOINT_POST = "/api/dashboards/db"
@@ -99,8 +98,13 @@ class DashboardResource(BaseEntity):
         payload["message"] = f"grafanaut sync from {ctx.source}"
 
         path = self.get_entity_path(entity)
-        if client.exists(path):
-            detail = self.describe_difference(client.get(path), payload)
+        current = client.get(path) if client.exists(path) else None
+
+        if self.blocked_by_collision(client, current, payload, name, ctx):
+            return
+
+        if current is not None:
+            detail = self.describe_difference(current, payload)
             if detail is None:
                 self.unchanged(ctx, name)
                 return
@@ -114,6 +118,54 @@ class DashboardResource(BaseEntity):
             return
         body, response = client.post(self.endpoint(), payload)
         self.record_result(ctx, response, body, entity, action, name, detail, verb)
+
+    def blocked_by_collision(self, client, current, payload, name, ctx):
+        """Refuse to write into a title collision.
+
+        overwrite=true tells Grafana to overwrite a dashboard with the same
+        title in the target folder, not just one with the same uid. Posting
+        into a collision therefore silently absorbs a dashboard that exists
+        only in the target and is not in the backup.
+
+        Only checked where it can actually happen: when the dashboard is new
+        to the target, or when it moves into a different folder. An in-place
+        update of a known uid cannot collide with anything.
+        """
+        target_folder = payload.get("folderUid") or ""
+        if current is not None:
+            current_folder = (current.get("meta") or {}).get("folderUid") or ""
+            if current_folder == target_folder:
+                return False
+
+        title = payload["dashboard"].get("title", "")
+        clash = self.find_title_collision(
+            client, target_folder, title, payload["dashboard"]["uid"]
+        )
+        if clash is None:
+            return False
+
+        self.report_conflict(
+            ctx, name,
+            f"folder {target_folder or 'root'} already holds a different "
+            f"dashboard titled {title!r} (uid {clash.get('uid')})",
+        )
+        return True
+
+    def find_title_collision(self, client, folder_uid, title, own_uid):
+        """A different dashboard with the same title in the same folder."""
+        if not title:
+            return None
+        hits = client.get(
+            f"/api/search?type=dash-db&limit={PAGE_SIZE}&query={quote(title)}"
+        )
+        for item in hits:
+            if item.get("uid") == own_uid:
+                continue
+            if (item.get("folderUid") or "") != (folder_uid or ""):
+                continue
+            if self.same_title(item.get("title"), title):
+                return item
+        return None
 
     def describe_difference(self, current, desired):
         """Compare the target's dashboard against what we would push.
@@ -132,21 +184,10 @@ class DashboardResource(BaseEntity):
                 f"folder: {current_folder or 'root'} -> {desired_folder or 'root'}"
             )
 
-        differing = _differing_keys(current.get("dashboard") or {}, desired["dashboard"])
-        if differing:
-            reasons.append("fields: " + ", ".join(differing))
+        fields = changes.describe_differences(
+            current.get("dashboard") or {}, desired["dashboard"], VOLATILE_FIELDS
+        )
+        if fields:
+            reasons.append(fields)
 
-        return ", ".join(reasons) if reasons else None
-
-
-def _differing_keys(current, desired):
-    """Top level dashboard keys whose value differs, ignoring volatile ones."""
-    keys = (set(current) | set(desired)) - VOLATILE_FIELDS
-    differing = sorted(
-        key for key in keys
-        if json.dumps(current.get(key), sort_keys=True, default=str)
-        != json.dumps(desired.get(key), sort_keys=True, default=str)
-    )
-    if len(differing) > MAX_REPORTED_FIELDS:
-        return differing[:MAX_REPORTED_FIELDS] + [f"+{len(differing) - MAX_REPORTED_FIELDS} more"]
-    return differing
+        return "; ".join(reasons) if reasons else None

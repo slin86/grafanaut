@@ -71,7 +71,19 @@ class FakeGrafana:
         if route.startswith("/api/folders/"):
             return dict(self.folders[route.split("/")[3]])
         if route == "/api/search":
-            return [{"uid": uid} for uid in self.dashboards]
+            wanted = (query.get("query") or "").casefold()
+            hits = []
+            for uid, record in self.dashboards.items():
+                title = record["dashboard"].get("title", "")
+                if wanted and wanted not in title.casefold():
+                    continue
+                hits.append({
+                    "uid": uid,
+                    "title": title,
+                    "folderUid": record["folderUid"],
+                    "type": "dash-db",
+                })
+            return hits
         if route.startswith("/api/dashboards/uid/"):
             record = self.dashboards[route.split("/")[4]]
             return {

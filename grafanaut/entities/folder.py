@@ -123,8 +123,11 @@ class FolderResource(BaseEntity):
         path = self.get_entity_path(desired)
         exists = client.exists(path)
 
+        current = client.get(path) if exists else None
+        if self._blocked_by_collision(client, current, desired, ctx):
+            return
+
         if exists:
-            current = client.get(path)
             touched = self._rename(client, path, current, desired, ctx)
             touched |= self._move(client, path, current, desired, ctx)
         else:
@@ -138,6 +141,44 @@ class FolderResource(BaseEntity):
 
         if not touched:
             self.unchanged(ctx, desired["title"])
+
+    def _blocked_by_collision(self, client, current, desired, ctx):
+        """Folder titles must be unique within a parent.
+
+        Creating or moving into a parent that already holds a different folder
+        with the same title would fail in the API anyway, but the message is
+        unhelpful and the follow-up damage is worse: every dashboard pointing
+        at the missing folder fails afterwards. Detect it up front and name
+        the folder that is in the way.
+
+        Only checked when the title or the parent actually changes.
+        """
+        parent = desired.get("parentUid") or None
+        if current is not None:
+            same_place = (current.get("parentUid") or None) == parent
+            if same_place and self.same_title(current.get("title"), desired["title"]):
+                return False
+
+        clash = self.find_title_collision(
+            client, parent, desired["title"], desired["uid"]
+        )
+        if clash is None:
+            return False
+
+        self.report_conflict(
+            ctx, desired["title"],
+            f"{parent or 'root'} already holds a different folder titled "
+            f"{desired['title']!r} (uid {clash['uid']})",
+        )
+        return True
+
+    def find_title_collision(self, client, parent_uid, title, own_uid):
+        for sibling in self._list_children(client, parent_uid):
+            if sibling["uid"] == own_uid:
+                continue
+            if self.same_title(sibling.get("title"), title):
+                return sibling
+        return None
 
     def _create(self, client, desired, ctx):
         parent = desired.get("parentUid") or "root"
@@ -159,7 +200,11 @@ class FolderResource(BaseEntity):
         same_description = (current.get("description") or "") == (desired.get("description") or "")
         if same_title and same_description:
             return False
-        detail = "description" if same_title else f"title: {current.get('title')!r}"
+        detail = (
+            "description"
+            if same_title
+            else f"title: {current.get('title')!r} -> {desired['title']!r}"
+        )
         logger.info(f"\t -> updating folder: {current.get('title')} -> {desired['title']} [{detail}]")
         if ctx.dry_run:
             ctx.record(NAME, changes.UPDATE, desired["title"], detail)

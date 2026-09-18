@@ -93,7 +93,7 @@ def test_moved_dashboard_reports_the_folder_change(resource):
     assert "folder: old -> new" in change.detail
 
 
-def test_changed_content_names_the_fields(resource):
+def test_changed_content_shows_the_old_and_new_value(resource):
     grafana = FakeGrafana()
     grafana.add_dashboard("d1", "Old title", folder_uid="", tags=["synced:test"])
     ctx = SyncContext(source="test", policy=SyncPolicy())
@@ -101,4 +101,21 @@ def test_changed_content_names_the_fields(resource):
     entity = resource.convert({"dashboard": {"uid": "d1", "title": "New title"}, "meta": {}})
     resource.make_update(grafana, entity, ctx)
 
-    assert "fields: title" in ctx.changes.changed()[0].detail
+    assert ctx.changes.changed()[0].detail == "title: 'Old title' -> 'New title'"
+
+
+def test_panels_only_get_a_size_hint_not_a_full_diff(resource):
+    grafana = FakeGrafana()
+    grafana.dashboards["d1"] = {
+        "dashboard": {"uid": "d1", "title": "D", "panels": [{"id": 1}, {"id": 2}]},
+        "folderUid": "",
+    }
+    ctx = SyncContext(source="test", policy=SyncPolicy(dashboard_tag=""))
+
+    entity = resource.convert({
+        "dashboard": {"uid": "d1", "title": "D", "panels": [{"id": 1}, {"id": 2}, {"id": 3}]},
+        "meta": {},
+    })
+    resource.make_update(grafana, entity, ctx)
+
+    assert ctx.changes.changed()[0].detail == "panels: 2 -> 3 entries"

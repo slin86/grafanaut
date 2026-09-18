@@ -101,11 +101,55 @@ that can be kept as a CI artifact:
 grafanaut --mode restore --source test --targets qs --dry-run --report changes.json
 ```
 
+How much detail a field gets depends on how readable it can be:
+
+| Field shape | Reported as |
+| --- | --- |
+| Scalar (title, uid, url) | `title: 'Aufzug Services' -> 'Aufzug Services v2'` |
+| List of scalars (tags) | `tags: +synced:test, -draft` |
+| Key on one side only | `basicAuthUser: 'svc' -> <not set>` |
+| Nested object (jsonData) | `jsonData: timeout, tlsSkipVerify` |
+| Deep list (panels, templating) | `panels: 12 -> 14 entries` |
+
+Deep structures deliberately get only a size hint. Rendering a panel diff in a
+log line is unreadable, and the backup directory is a git repository -- for the
+exact change, `git diff` on `<backup_dir>/<source>/dashboards/<uid>.json` is
+the right tool.
+
 One caveat on the content comparison: Grafana normalises a dashboard when it
 is saved (schema migrations, panel defaults). A dashboard imported from an
 older schema version can therefore report differing fields even when nothing
 meaningful changed. The folder comparison is exact, the field list is a strong
 hint rather than a guarantee.
+
+---
+
+## Name collisions
+
+A dashboard or folder that is new to a target, or that moves into a different
+folder, can run into an object of the same name that exists only in that
+target. Grafanaut refuses to write in that case and reports a `conflict`:
+
+```
+[ERROR] 		CONFLICT, skipping dashboards Betriebszustand: folder team already
+        holds a different dashboard titled 'Betriebszustand' (uid abc123)
+```
+
+This matters most for dashboards. `overwrite: true` tells Grafana to overwrite
+a dashboard with the same *title in the folder*, not only one with the same
+uid, so writing into a collision would silently absorb the target's own
+dashboard. For folders the API would reject the write anyway, but detecting it
+up front produces a usable message and avoids the follow-up failures of every
+dashboard pointing at the folder that was never created.
+
+Conflicts are logged as errors, so the run ends with exit code 1 and the
+pipeline turns red. Resolve them by renaming one of the two objects, or by
+giving the target object the uid from the source if they are meant to be the
+same dashboard.
+
+The check runs only where a collision is possible: on creation and on a folder
+change. A plain in-place update of a known uid cannot collide and costs no
+extra request.
 
 ---
 

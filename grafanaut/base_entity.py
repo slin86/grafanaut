@@ -195,6 +195,17 @@ class BaseEntity(ABC):
         )
 
     # ------------------------------------------------------------------
+    def report_conflict(self, ctx, name, detail):
+        """A write was refused to protect an object that only exists in the
+        target. Logged as an error so the run ends with a non-zero exit code."""
+        logger.error(f"\t\tCONFLICT, skipping {self.name()} {name}: {detail}")
+        ctx.record(self.name(), changes.CONFLICT, name, detail)
+
+    @staticmethod
+    def same_title(left, right):
+        """Grafana treats titles case insensitively when checking uniqueness."""
+        return (left or "").strip().casefold() == (right or "").strip().casefold()
+
     def check(self, response, body, entity, action):
         """Log any 4xx/5xx. The previous threshold was >499, which swallowed
         every 400 ('folder not found', 'rules still attached', ...)."""

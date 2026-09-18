@@ -8,12 +8,19 @@ separately.
 
 from __future__ import annotations
 
-import json
-
+from grafanaut import changes
 from grafanaut.base_entity import BaseEntity
 
 NAME = "datasource"
 ENDPOINT = "/api/datasources"
+
+# Fields the API derives or reports read-only. They differ between instances
+# (and between Grafana versions) but cannot be written, so including them in
+# the comparison would mark every datasource as changed on every single run.
+DERIVED_FIELDS = {
+    "id", "orgId", "version", "readOnly", "uid",
+    "typeName", "typeLogoUrl", "accessControl", "secureJsonFields",
+}
 
 
 class DatasourceResource(BaseEntity):
@@ -34,12 +41,12 @@ class DatasourceResource(BaseEntity):
         return f"{ENDPOINT}/uid/{entity['uid']}"
 
     def sanitize(self, entity):
-        sanitized = dict(entity)
-        # Numeric ids differ per instance and only create git noise.
-        sanitized.pop("id", None)
-        sanitized.pop("orgId", None)
-        sanitized.pop("version", None)
-        return sanitized
+        # Keep uid (it is the file name and the identity), drop the rest of the
+        # derived fields so they never enter the backup in the first place.
+        return {
+            key: value for key, value in entity.items()
+            if key == "uid" or key not in DERIVED_FIELDS
+        }
 
     def convert(self, data):
         payload = dict(data)
@@ -47,13 +54,4 @@ class DatasourceResource(BaseEntity):
         return payload
 
     def describe_difference(self, current, desired):
-        ignored = {"id", "orgId", "version", "readOnly", "typeLogoUrl"}
-        keys = (set(current) | set(desired)) - ignored
-        differing = sorted(
-            key for key in keys
-            if json.dumps(current.get(key), sort_keys=True, default=str)
-            != json.dumps(desired.get(key), sort_keys=True, default=str)
-        )
-        if not differing:
-            return None
-        return "fields: " + ", ".join(differing[:5])
+        return changes.describe_differences(current, desired, DERIVED_FIELDS)

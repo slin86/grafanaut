@@ -28,3 +28,6 @@ sync:
   folder_title_suffix: " [synced]"
   folder_description: "Managed by grafanaut, synced from {source}. Local changes are overwritten."
   dashboard_tag: "synced:{source}"
+
+# Name collisions (a same-named object that exists only in the target) are
+# always refused and reported, there is nothing to configure. See README.
