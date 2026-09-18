@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from grafanaut.changes import ChangeLog
+
 VIEW = 1
 EDIT = 2
 ADMIN = 4
@@ -85,6 +87,10 @@ class SyncContext:
     source: str
     policy: SyncPolicy = field(default_factory=SyncPolicy)
     dry_run: bool = False
+    changes: ChangeLog = field(default_factory=ChangeLog)
+
+    def record(self, resource, action, name, detail=""):
+        self.changes.record(resource, action, name, detail)
 
 
 def _optional(raw, key, default):

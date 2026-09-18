@@ -6,6 +6,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 
+from grafanaut import changes
 from grafanaut.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -111,17 +112,48 @@ class BaseEntity(ABC):
 
     def make_update(self, client, entity, ctx):
         path = self.get_entity_path(entity)
+        name = self.entity_name(entity)
+
         if client.exists(path):
-            logger.info(f"\t -> updating {self.name()}: {self.entity_name(entity)}")
-            if ctx.dry_run:
+            detail = self.describe_difference(client.get(path), entity)
+            if detail is None:
+                self.unchanged(ctx, name)
                 return
+            action, verb = changes.UPDATE, "updating"
+        else:
+            detail, action, verb = "", changes.CREATE, "creating"
+
+        self.announce(ctx, action, name, detail, verb)
+        if ctx.dry_run:
+            ctx.record(self.name(), action, name, detail)
+            return
+        if action == changes.UPDATE:
             body, response = client.put(path, entity)
         else:
-            logger.info(f"\t -> creating {self.name()}: {self.entity_name(entity)}")
-            if ctx.dry_run:
-                return
             body, response = client.post(self.endpoint(), entity)
-        self.check(response, body, entity, "restoring")
+        self.record_result(ctx, response, body, entity, action, name, detail, "restoring")
+
+    def describe_difference(self, current, desired):
+        """Return a short description of what differs, or None when the object
+        is already in the wanted state. Returning "" means "differs, no detail"."""
+        return ""
+
+    # ------------------------------------------------------------------
+    # change reporting
+    # ------------------------------------------------------------------
+    def announce(self, ctx, action, name, detail, verb):
+        suffix = f" [{detail}]" if detail else ""
+        logger.info(f"\t -> {verb} {self.name()}: {name}{suffix}")
+
+    def unchanged(self, ctx, name):
+        ctx.record(self.name(), changes.UNCHANGED, name)
+        logger.debug(f"\t    unchanged {self.name()}: {name}")
+
+    def record_result(self, ctx, response, body, entity, action, name, detail, verb):
+        if self.check(response, body, entity, verb):
+            ctx.record(self.name(), action, name, detail)
+        else:
+            ctx.record(self.name(), changes.FAILED, name, f"{verb}: {response.status_code}")
 
     # ------------------------------------------------------------------
     # deletion mirroring
@@ -147,16 +179,20 @@ class BaseEntity(ABC):
     def deletion_order(self, entities):
         return entities
 
-    def delete(self, client, entity, ctx=None):
+    def delete(self, client, entity, ctx):
         path = self.delete_path(entity)
         logger.info(f"\t -> deleting {self.name()}: {self.entity_name(entity)} ({path})")
-        if ctx is not None and ctx.dry_run:
+        if ctx.dry_run:
+            ctx.record(self.name(), changes.DELETE, self.entity_name(entity))
             return
         body, response = client.delete(path)
         if response.status_code == 404:
             logger.info(f"\t\talready gone: {self.entity_name(entity)}")
             return
-        self.check(response, body, entity, "deleting")
+        self.record_result(
+            ctx, response, body, entity, changes.DELETE,
+            self.entity_name(entity), "", "deleting",
+        )
 
     # ------------------------------------------------------------------
     def check(self, response, body, entity, action):

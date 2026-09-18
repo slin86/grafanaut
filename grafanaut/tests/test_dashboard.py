@@ -65,3 +65,40 @@ def test_sanitize_drops_volatile_fields(resource):
     assert "id" not in sanitized["dashboard"]
     assert "version" not in sanitized["dashboard"]
     assert sanitized["meta"] == {"folderUid": "f1", "folderTitle": ""}
+
+
+def test_unchanged_dashboard_is_not_reposted(resource):
+    grafana = FakeGrafana()
+    ctx = SyncContext(source="test", policy=SyncPolicy())
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "D"}, "meta": {"folderUid": "f1"}})
+
+    resource.make_update(grafana, entity, ctx)      # creates
+    grafana.calls.clear()
+    resource.make_update(grafana, entity, ctx)      # must be a no-op
+
+    assert [c for c in grafana.calls if c[0] == "POST"] == []
+    assert ctx.changes.counts() == {"create": 1, "unchanged": 1}
+
+
+def test_moved_dashboard_reports_the_folder_change(resource):
+    grafana = FakeGrafana()
+    grafana.add_dashboard("d1", "D", folder_uid="old", tags=["synced:test"])
+    ctx = SyncContext(source="test", policy=SyncPolicy())
+
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "D"}, "meta": {"folderUid": "new"}})
+    resource.make_update(grafana, entity, ctx)
+
+    change = ctx.changes.changed()[0]
+    assert change.action == "update"
+    assert "folder: old -> new" in change.detail
+
+
+def test_changed_content_names_the_fields(resource):
+    grafana = FakeGrafana()
+    grafana.add_dashboard("d1", "Old title", folder_uid="", tags=["synced:test"])
+    ctx = SyncContext(source="test", policy=SyncPolicy())
+
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "New title"}, "meta": {}})
+    resource.make_update(grafana, entity, ctx)
+
+    assert "fields: title" in ctx.changes.changed()[0].detail

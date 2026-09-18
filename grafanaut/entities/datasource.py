@@ -8,6 +8,8 @@ separately.
 
 from __future__ import annotations
 
+import json
+
 from grafanaut.base_entity import BaseEntity
 
 NAME = "datasource"
@@ -43,3 +45,15 @@ class DatasourceResource(BaseEntity):
         payload = dict(data)
         payload["id"] = None
         return payload
+
+    def describe_difference(self, current, desired):
+        ignored = {"id", "orgId", "version", "readOnly", "typeLogoUrl"}
+        keys = (set(current) | set(desired)) - ignored
+        differing = sorted(
+            key for key in keys
+            if json.dumps(current.get(key), sort_keys=True, default=str)
+            != json.dumps(desired.get(key), sort_keys=True, default=str)
+        )
+        if not differing:
+            return None
+        return "fields: " + ", ".join(differing[:5])

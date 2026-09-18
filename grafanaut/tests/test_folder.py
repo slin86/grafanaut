@@ -144,3 +144,28 @@ def test_dry_run_writes_nothing(resource):
     ctx = SyncContext(source="test", policy=SyncPolicy(), dry_run=True)
     resource.make_update(grafana, {"uid": "a", "title": "A", "parentUid": None}, ctx)
     assert grafana.folders == {}
+
+
+def test_dry_run_does_not_read_permissions_of_a_missing_folder(resource):
+    # Regression: a folder that would only be created during the run does not
+    # exist yet, reading its permissions produced a 404 error in the log.
+    grafana = FakeGrafana()
+    ctx = SyncContext(source="test", policy=SyncPolicy(), dry_run=True)
+
+    resource.make_update(grafana, {"uid": "new", "title": "New", "parentUid": None}, ctx)
+
+    assert not any("permissions" in call[1] for call in grafana.calls)
+    assert ctx.changes.counts() == {"create": 1}
+
+
+def test_unchanged_folder_is_reported_as_unchanged(resource):
+    grafana = FakeGrafana()
+    ctx = SyncContext(source="test", policy=SyncPolicy())
+    entity = {"uid": "a", "title": "A", "parentUid": None}
+
+    resource.make_update(grafana, entity, ctx)
+    second = SyncContext(source="test", policy=SyncPolicy())
+    resource.make_update(grafana, entity, second)
+
+    assert second.changes.counts() == {"unchanged": 1}
+    assert second.changes.has_changes() is False

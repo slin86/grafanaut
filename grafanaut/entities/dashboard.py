@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+
+from grafanaut import changes
 from grafanaut.base_entity import BaseEntity
 from grafanaut.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# Fields Grafana maintains itself, never a reason to push a new version.
+VOLATILE_FIELDS = {"id", "version"}
+MAX_REPORTED_FIELDS = 5
 
 NAME = "dashboards"
 ENDPOINT_POST = "/api/dashboards/db"
@@ -77,16 +84,69 @@ class DashboardResource(BaseEntity):
         }
 
     def make_update(self, client, entity, ctx):
-        """Always POST. /api/dashboards/db creates or updates by uid, and
-        moving between folders is done by sending a different folderUid with
-        overwrite=true."""
+        """Create, update or move. /api/dashboards/db does all three: the uid
+        decides create vs update, and a different folderUid moves it.
+
+        The target is read first so an unchanged dashboard is skipped instead
+        of posting a new version on every run. That keeps the version history
+        of the target clean and makes a dry run show the actual delta.
+        """
+        name = self.entity_name(entity)
         payload = dict(entity)
         payload["dashboard"] = ctx.policy.decorate_dashboard(
             dict(entity["dashboard"]), ctx.source
         )
         payload["message"] = f"grafanaut sync from {ctx.source}"
-        logger.info(f"\t -> restoring {self.name()}: {self.entity_name(entity)}")
+
+        path = self.get_entity_path(entity)
+        if client.exists(path):
+            detail = self.describe_difference(client.get(path), payload)
+            if detail is None:
+                self.unchanged(ctx, name)
+                return
+            action, verb = changes.UPDATE, "updating"
+        else:
+            detail, action, verb = "", changes.CREATE, "creating"
+
+        self.announce(ctx, action, name, detail, verb)
         if ctx.dry_run:
+            ctx.record(self.name(), action, name, detail)
             return
         body, response = client.post(self.endpoint(), payload)
-        self.check(response, body, entity, "restoring")
+        self.record_result(ctx, response, body, entity, action, name, detail, verb)
+
+    def describe_difference(self, current, desired):
+        """Compare the target's dashboard against what we would push.
+
+        Caveat: Grafana normalises a dashboard on save (schema migrations,
+        panel defaults), so a dashboard that was imported from an older schema
+        can report differing keys even though nothing meaningful changed. The
+        folder comparison is exact, the content comparison is a strong hint.
+        """
+        reasons = []
+
+        current_folder = (current.get("meta") or {}).get("folderUid") or ""
+        desired_folder = desired.get("folderUid") or ""
+        if current_folder != desired_folder:
+            reasons.append(
+                f"folder: {current_folder or 'root'} -> {desired_folder or 'root'}"
+            )
+
+        differing = _differing_keys(current.get("dashboard") or {}, desired["dashboard"])
+        if differing:
+            reasons.append("fields: " + ", ".join(differing))
+
+        return ", ".join(reasons) if reasons else None
+
+
+def _differing_keys(current, desired):
+    """Top level dashboard keys whose value differs, ignoring volatile ones."""
+    keys = (set(current) | set(desired)) - VOLATILE_FIELDS
+    differing = sorted(
+        key for key in keys
+        if json.dumps(current.get(key), sort_keys=True, default=str)
+        != json.dumps(desired.get(key), sort_keys=True, default=str)
+    )
+    if len(differing) > MAX_REPORTED_FIELDS:
+        return differing[:MAX_REPORTED_FIELDS] + [f"+{len(differing) - MAX_REPORTED_FIELDS} more"]
+    return differing

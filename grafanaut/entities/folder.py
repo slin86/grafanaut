@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from grafanaut import changes
 from grafanaut.base_entity import BaseEntity
 from grafanaut.logger import setup_logger
 from grafanaut.sync_policy import VIEW
@@ -120,20 +121,29 @@ class FolderResource(BaseEntity):
     def make_update(self, client, entity, ctx):
         desired = ctx.policy.decorate_folder(entity, ctx.source)
         path = self.get_entity_path(desired)
+        exists = client.exists(path)
 
-        if client.exists(path):
+        if exists:
             current = client.get(path)
-            self._rename(client, path, current, desired, ctx)
-            self._move(client, path, current, desired, ctx)
+            touched = self._rename(client, path, current, desired, ctx)
+            touched |= self._move(client, path, current, desired, ctx)
         else:
             self._create(client, desired, ctx)
+            touched = True
 
-        if ctx.policy.lock_folders:
-            self._lock(client, desired, ctx)
+        if ctx.policy.lock_folders and (exists or not ctx.dry_run):
+            # In a dry run a folder that would have just been created does not
+            # exist yet, so reading its permissions would only produce a 404.
+            touched |= self._lock(client, desired, ctx)
+
+        if not touched:
+            self.unchanged(ctx, desired["title"])
 
     def _create(self, client, desired, ctx):
-        logger.info(f"\t -> creating folder: {desired['title']}")
+        parent = desired.get("parentUid") or "root"
+        logger.info(f"\t -> creating folder: {desired['title']} [under {parent}]")
         if ctx.dry_run:
+            ctx.record(NAME, changes.CREATE, desired["title"], f"under {parent}")
             return
         payload = {"uid": desired["uid"], "title": desired["title"]}
         if desired.get("parentUid"):
@@ -141,21 +151,26 @@ class FolderResource(BaseEntity):
         if desired.get("description"):
             payload["description"] = desired["description"]
         body, response = client.post(ENDPOINT, payload)
-        self.check(response, body, desired, "creating")
+        self.record_result(ctx, response, body, desired, changes.CREATE,
+                           desired["title"], f"under {parent}", "creating")
 
     def _rename(self, client, path, current, desired, ctx):
         same_title = current.get("title") == desired["title"]
         same_description = (current.get("description") or "") == (desired.get("description") or "")
         if same_title and same_description:
-            return
-        logger.info(f"\t -> updating folder: {current.get('title')} -> {desired['title']}")
+            return False
+        detail = "description" if same_title else f"title: {current.get('title')!r}"
+        logger.info(f"\t -> updating folder: {current.get('title')} -> {desired['title']} [{detail}]")
         if ctx.dry_run:
-            return
+            ctx.record(NAME, changes.UPDATE, desired["title"], detail)
+            return True
         payload = {"title": desired["title"], "overwrite": True}
         if desired.get("description"):
             payload["description"] = desired["description"]
         body, response = client.put(path, payload)
-        self.check(response, body, desired, "renaming")
+        self.record_result(ctx, response, body, desired, changes.UPDATE,
+                           desired["title"], detail, "renaming")
+        return True
 
     def _move(self, client, path, current, desired, ctx):
         """PUT /api/folders/:uid ignores parentUid -- moving is a separate
@@ -164,15 +179,19 @@ class FolderResource(BaseEntity):
         current_parent = current.get("parentUid") or None
         desired_parent = desired.get("parentUid") or None
         if current_parent == desired_parent:
-            return
+            return False
         logger.info(
             f"\t -> moving folder {desired['title']}: "
             f"{current_parent or 'root'} -> {desired_parent or 'root'}"
         )
+        detail = f"{current_parent or 'root'} -> {desired_parent or 'root'}"
         if ctx.dry_run:
-            return
+            ctx.record(NAME, changes.MOVE, desired["title"], detail)
+            return True
         body, response = client.post(f"{path}/move", {"parentUid": desired_parent or ""})
-        self.check(response, body, desired, "moving")
+        self.record_result(ctx, response, body, desired, changes.MOVE,
+                           desired["title"], detail, "moving")
+        return True
 
     # ------------------------------------------------------------------
     # lockdown
@@ -193,7 +212,8 @@ class FolderResource(BaseEntity):
             current = client.get(f"{ENDPOINT}/{uid}/permissions")
         except Exception as exc:  # noqa: BLE001 - lockdown must not abort the sync
             logger.error(f"\t\tCould not read permissions of folder {uid}: {exc}")
-            return
+            ctx.record(NAME, changes.FAILED, desired["title"], "reading permissions")
+            return False
 
         items, changed = [], False
         for permission in current:
@@ -218,9 +238,12 @@ class FolderResource(BaseEntity):
                 changed = True
 
         if not changed:
-            return
+            return False
         logger.info(f"\t -> locking folder (read-only for non-admins): {desired['title']}")
         if ctx.dry_run:
-            return
+            ctx.record(NAME, changes.LOCK, desired["title"], "revoking write access")
+            return True
         body, response = client.post(f"{ENDPOINT}/{uid}/permissions", {"items": items})
-        self.check(response, body, desired, "locking")
+        self.record_result(ctx, response, body, desired, changes.LOCK,
+                           desired["title"], "revoking write access", "locking")
+        return True

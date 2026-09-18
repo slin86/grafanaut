@@ -1,4 +1,5 @@
 import argparse
+import logging
 import sys
 
 from grafanaut.main import main as grafanaut_main
@@ -20,11 +21,22 @@ def main():
     )
     parser.add_argument("--config", help="Path to config.yaml (env: GRAFANAUT_CONFIG)")
     parser.add_argument(
+        "--report", help="Write a JSON report of all changes to this path"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Also log unchanged objects"
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Log what would change without sending write requests",
     )
     args = parser.parse_args()
+    if args.verbose:
+        logging.getLogger("grafanaut").setLevel(logging.DEBUG)
+        for name in list(logging.root.manager.loggerDict):
+            if name.startswith("grafanaut"):
+                logging.getLogger(name).setLevel(logging.DEBUG)
 
     sys.exit(
         grafanaut_main(
@@ -33,6 +45,7 @@ def main():
             mode=args.mode,
             config_path=args.config,
             dry_run=args.dry_run,
+            report=args.report,
         )
     )
 

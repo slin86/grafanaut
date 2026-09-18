@@ -77,6 +77,38 @@ Add `--dry-run` to any mode to see what would happen without writing.
 
 ---
 
+## What changed?
+
+Every object is compared against the current state in the target before
+anything is written. Unchanged objects are skipped entirely, which keeps the
+version history of the targets clean and makes a dry run show the real delta:
+
+```
+[INFO]   -> moving folder Sub [synced]: team -> root
+[INFO]   -> updating dashboards: Dash One [folder: sub -> team]
+[INFO]   -> updating dashboards: Reports [fields: panels, templating]
+[INFO] Restore of qs: 2 update, 1 move, 96 unchanged
+[INFO] Would change 3 object(s):
+[INFO] 	[restore:qs] move folder 'Sub [synced]' (team -> root)
+...
+```
+
+A run that changes nothing says so explicitly. `--verbose` also logs the
+unchanged objects, `--report changes.json` writes a machine readable summary
+that can be kept as a CI artifact:
+
+```bash
+grafanaut --mode restore --source test --targets qs --dry-run --report changes.json
+```
+
+One caveat on the content comparison: Grafana normalises a dashboard when it
+is saved (schema migrations, panel defaults). A dashboard imported from an
+older schema version can therefore report differing fields even when nothing
+meaningful changed. The folder comparison is exact, the field list is a strong
+hint rather than a guarantee.
+
+---
+
 ## Sync protection
 
 Synced content should not be edited in the target instances, so grafanaut
