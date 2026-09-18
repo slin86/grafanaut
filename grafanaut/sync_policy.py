@@ -36,6 +36,13 @@ class SyncPolicy:
     """Read from the `sync:` block of config.yaml."""
 
     lock_folders: bool = True
+    # Sets "editable": false in the dashboard model. This hides the edit and
+    # save controls for everyone including admins, because it is a property of
+    # the dashboard and not a permission. It is a guard rail, not a lock:
+    # anyone who may write the dashboard can flip the flag back via
+    # Settings -> JSON Model or the API. Editors in a locked folder cannot,
+    # since they have no write access in the first place.
+    dashboards_editable: bool = True
     folder_title_suffix: str = " [synced]"
     folder_description: str = (
         "Managed by grafanaut, synced from {source}. Local changes are overwritten."
@@ -48,6 +55,9 @@ class SyncPolicy:
         defaults = cls()
         return cls(
             lock_folders=bool(raw.get("lock_folders", defaults.lock_folders)),
+            dashboards_editable=bool(
+                raw.get("dashboards_editable", defaults.dashboards_editable)
+            ),
             folder_title_suffix=_optional(raw, "folder_title_suffix", defaults.folder_title_suffix),
             folder_description=_optional(raw, "folder_description", defaults.folder_description),
             dashboard_tag=_optional(raw, "dashboard_tag", defaults.dashboard_tag),
@@ -69,7 +79,10 @@ class SyncPolicy:
         return decorated
 
     def decorate_dashboard(self, dashboard, source):
-        """Add the sync tag to a dashboard model (mutates and returns it)."""
+        """Apply the sync marking and the edit lock (mutates and returns it)."""
+        if not self.dashboards_editable:
+            dashboard["editable"] = False
+
         if not self.dashboard_tag:
             return dashboard
         tag = self.dashboard_tag.format(source=source)

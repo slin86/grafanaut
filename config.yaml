@@ -23,6 +23,13 @@ sync:
   # in grafana.ini on the target instances.
   lock_folders: true
 
+  # Set to false to write "editable": false into every restored dashboard.
+  # This removes the edit and save controls for EVERYONE including admins,
+  # because it is a property of the dashboard, not a permission. It is a guard
+  # rail, not a lock: anyone who may write the dashboard can set the flag back
+  # via Settings -> JSON Model or the API. Every run puts it back to false.
+  dashboards_editable: true
+
   # Visible markers. Set to an empty value to disable a single one.
   # {source} is replaced with the source instance name.
   folder_title_suffix: " [synced]"
@@ -31,3 +38,6 @@ sync:
 
 # Name collisions (a same-named object that exists only in the target) are
 # always refused and reported, there is nothing to configure. See README.
+
+
+

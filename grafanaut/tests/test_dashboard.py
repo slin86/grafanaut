@@ -119,3 +119,42 @@ def test_panels_only_get_a_size_hint_not_a_full_diff(resource):
     resource.make_update(grafana, entity, ctx)
 
     assert ctx.changes.changed()[0].detail == "panels: 2 -> 3 entries"
+
+
+def test_dashboards_can_be_marked_read_only(resource):
+    grafana = FakeGrafana()
+    ctx = SyncContext(
+        source="test",
+        policy=SyncPolicy(dashboards_editable=False, dashboard_tag=""),
+    )
+
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "D"}, "meta": {}})
+    resource.make_update(grafana, entity, ctx)
+
+    assert grafana.dashboards["d1"]["dashboard"]["editable"] is False
+
+
+def test_read_only_flag_is_restored_when_someone_flips_it_back(resource):
+    grafana = FakeGrafana()
+    grafana.add_dashboard("d1", "D", folder_uid="")
+    grafana.dashboards["d1"]["dashboard"]["editable"] = True
+    ctx = SyncContext(
+        source="test",
+        policy=SyncPolicy(dashboards_editable=False, dashboard_tag=""),
+    )
+
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "D"}, "meta": {}})
+    resource.make_update(grafana, entity, ctx)
+
+    assert grafana.dashboards["d1"]["dashboard"]["editable"] is False
+    assert "editable" in ctx.changes.changed()[0].detail
+
+
+def test_editable_stays_untouched_by_default(resource):
+    grafana = FakeGrafana()
+    ctx = SyncContext(source="test", policy=SyncPolicy(dashboard_tag=""))
+
+    entity = resource.convert({"dashboard": {"uid": "d1", "title": "D"}, "meta": {}})
+    resource.make_update(grafana, entity, ctx)
+
+    assert "editable" not in grafana.dashboards["d1"]["dashboard"]

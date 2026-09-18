@@ -191,6 +191,34 @@ viewers_can_edit = true
 
 This is a server setting and cannot be applied through the API.
 
+### Read-only dashboards (`dashboards_editable: false`)
+
+Writes `"editable": false` into every restored dashboard. Grafana then hides
+the edit and save controls.
+
+Unlike the folder permissions this applies to **everyone, admins included**,
+because `editable` is a field of the dashboard model rather than a permission.
+For the same reason it is a guard rail and not a lock: anyone who is allowed
+to write the dashboard can set the flag back through Settings -> JSON Model or
+the API. Editors inside a locked folder cannot, they have no write access at
+all; admins can.
+
+If someone does flip it back, the next run reports it and puts it back:
+
+```
+-> updating dashboards: GTI Dashboard [editable: True -> False]
+```
+
+The two mechanisms answer different questions and are meant to be combined:
+
+| | `lock_folders` | `dashboards_editable: false` |
+| --- | --- | --- |
+| Mechanism | Folder permissions | Dashboard JSON field |
+| Applies to admins | No | Yes |
+| Can be undone by the user | No (editors) | Yes (anyone who may write) |
+| Blocks add/delete in folder | Yes | No |
+| Survives without re-sync | Yes | Restored on every run |
+
 ### Marking
 
 So a synced folder stays recognisable even where locking does not apply
