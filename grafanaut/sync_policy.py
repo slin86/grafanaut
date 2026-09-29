@@ -32,6 +32,62 @@ ADMIN = 4
 
 
 @dataclass
+class AlertingPolicy:
+    """Which alerting resources take part, read from the `alerting:` block.
+
+    Everything is off by default: alerting was explicitly out of scope for the
+    original tool, and turning it on changes what a run touches.
+
+    `notification_policy` is the odd one out. The policy tree is a single
+    global object and PUT replaces all of it, so a route that exists only in
+    the target is lost. `enabled: true` therefore does NOT include it; it has
+    to be asked for by name.
+    """
+
+    enabled_resources: frozenset = frozenset()
+
+    # The resources `enabled: true` turns on. The policy tree is deliberately
+    # not in this list.
+    SAFE_RESOURCES = (
+        "alert_rules", "contact_points", "mute_timings", "templates",
+    )
+    ALL_RESOURCES = SAFE_RESOURCES + ("notification_policy",)
+
+    @classmethod
+    def from_dict(cls, raw):
+        raw = raw or {}
+        # Catch typos before they silently disable a resource someone meant to
+        # switch on.
+        unknown = set(raw) - set(cls.ALL_RESOURCES) - {"enabled"}
+        if unknown:
+            raise RuntimeError(
+                f"Grafanaut: unknown alerting option(s) {', '.join(sorted(unknown))}"
+            )
+
+        if not raw.get("enabled", False):
+            # Individual flags still count, so a block naming one resource
+            # works without also setting enabled.
+            return cls(enabled_resources=frozenset(
+                key for key in cls.ALL_RESOURCES if raw.get(key) is True
+            ))
+
+        selected = set(cls.SAFE_RESOURCES)
+        for key in cls.ALL_RESOURCES:
+            if key in raw:
+                if raw[key]:
+                    selected.add(key)
+                else:
+                    selected.discard(key)
+        return cls(enabled_resources=frozenset(selected))
+
+    def enabled(self, resource):
+        return resource in self.enabled_resources
+
+    def any_enabled(self):
+        return bool(self.enabled_resources)
+
+
+@dataclass
 class SyncPolicy:
     """Read from the `sync:` block of config.yaml."""
 
@@ -43,6 +99,10 @@ class SyncPolicy:
     # Settings -> JSON Model or the API. Editors in a locked folder cannot,
     # since they have no write access in the first place.
     dashboards_editable: bool = True
+    # Alerting resources are written through the provisioning API, which marks
+    # them as provisioned and read-only in the UI. The X-Disable-Provenance
+    # header keeps them editable like hand-made ones.
+    alerting_editable: bool = True
     folder_title_suffix: str = " [synced]"
     folder_description: str = (
         "Managed by grafanaut, synced from {source}. Local changes are overwritten."
@@ -57,6 +117,9 @@ class SyncPolicy:
             lock_folders=bool(raw.get("lock_folders", defaults.lock_folders)),
             dashboards_editable=bool(
                 raw.get("dashboards_editable", defaults.dashboards_editable)
+            ),
+            alerting_editable=bool(
+                raw.get("alerting_editable", defaults.alerting_editable)
             ),
             folder_title_suffix=_optional(raw, "folder_title_suffix", defaults.folder_title_suffix),
             folder_description=_optional(raw, "folder_description", defaults.folder_description),

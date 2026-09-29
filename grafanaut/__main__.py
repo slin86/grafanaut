@@ -31,6 +31,22 @@ def main():
         action="store_true",
         help="Log what would change without sending write requests",
     )
+    alerting = parser.add_mutually_exclusive_group()
+    alerting.add_argument(
+        "--alerting",
+        dest="alerting",
+        action="store_true",
+        default=None,
+        help="Include alert rules, contact points, mute timings and templates "
+             "for this run, whatever config.yaml says. The notification policy "
+             "tree is only included when config.yaml enables it.",
+    )
+    alerting.add_argument(
+        "--no-alerting",
+        dest="alerting",
+        action="store_false",
+        help="Skip all alerting resources for this run",
+    )
     args = parser.parse_args()
     if args.verbose:
         logging.getLogger("grafanaut").setLevel(logging.DEBUG)
@@ -46,6 +62,7 @@ def main():
             config_path=args.config,
             dry_run=args.dry_run,
             report=args.report,
+            alerting=args.alerting,
         )
     )
 

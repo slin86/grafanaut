@@ -6,14 +6,15 @@ from dataclasses import replace
 
 from grafanaut.changes import ChangeLog, write_report
 from grafanaut.config import GrafanautConfig
-from grafanaut.entities import RESOURCE_REGISTRY
+from grafanaut.entities import RESOURCE_REGISTRY, build_registry
 from grafanaut.logger import error_count, setup_logger
-from grafanaut.sync_policy import SyncContext
+from grafanaut.sync_policy import AlertingPolicy, SyncContext
 
 logger = setup_logger(__name__)
 
 
-def main(source, targets, mode="all", config_path=None, dry_run=False, report=None):
+def main(source, targets, mode="all", config_path=None, dry_run=False, report=None,
+         alerting=None):
     logger.info("Starting Grafanaut...")
     if dry_run:
         logger.info("DRY RUN - no write requests will be sent")
@@ -22,21 +23,31 @@ def main(source, targets, mode="all", config_path=None, dry_run=False, report=No
     if mode in ("restore", "mirror-deletions", "all") and not targets:
         raise RuntimeError(f"Grafanaut: mode '{mode}' requires --targets")
 
+    # --alerting / --no-alerting override the config for a single run, which is
+    # what the one-off import/export needs.
+    alerting_policy = _resolve_alerting(config, alerting)
+    registry = build_registry(alerting_policy)
+    if alerting_policy.any_enabled():
+        logger.info(
+            "Alerting enabled: "
+            + ", ".join(sorted(alerting_policy.enabled_resources))
+        )
+
     backup_dir = config.backup_dir_for(source)
     ctx = SyncContext(source=source, policy=config.sync, dry_run=dry_run)
     source_client = config.client(source)
     changelogs = []
 
     if mode in ("mirror-deletions", "backup", "all"):
-        process_backup(source_client, backup_dir)
+        process_backup(source_client, backup_dir, registry)
 
     if mode in ("mirror-deletions", "all"):
         changelogs += process_mirror_deletions(
-            config, source_client, backup_dir, targets, ctx
+            config, source_client, backup_dir, targets, ctx, registry
         )
 
     if mode in ("restore", "all"):
-        changelogs += process_restore(config, backup_dir, targets, ctx)
+        changelogs += process_restore(config, backup_dir, targets, ctx, registry)
 
     report_changes(changelogs, report, dry_run)
 
@@ -48,27 +59,45 @@ def main(source, targets, mode="all", config_path=None, dry_run=False, report=No
     return 0
 
 
-def process_backup(source_client, backup_dir):
+def _resolve_alerting(config, override):
+    """Merge the config's alerting block with the CLI override."""
+    if override is None:
+        return config.alerting
+    if override is False:
+        return AlertingPolicy(enabled_resources=frozenset())
+    # --alerting without a value means "the safe set", the policy tree stays
+    # out unless the config asks for it.
+    selected = set(AlertingPolicy.SAFE_RESOURCES)
+    if config.alerting.enabled("notification_policy"):
+        selected.add("notification_policy")
+    return AlertingPolicy(enabled_resources=frozenset(selected))
+
+
+def process_backup(source_client, backup_dir, registry=None):
+    registry = registry if registry is not None else RESOURCE_REGISTRY
     logger.info(f"Backup into {backup_dir} started")
-    for resource in RESOURCE_REGISTRY:
+    for resource in registry:
         resource.backup(source_client, backup_dir)
     logger.info("Backup done!")
 
 
-def process_restore(config, backup_dir, targets, ctx):
+def process_restore(config, backup_dir, targets, ctx, registry=None):
+    registry = registry if registry is not None else RESOURCE_REGISTRY
     changelogs = []
     for target in targets:
         logger.info(f"Starting restore of {target}")
         target_ctx = replace(ctx, changes=ChangeLog(target=f"restore:{target}"))
         target_client = config.client(target)
-        for resource in RESOURCE_REGISTRY:
+        for resource in registry:
             resource.restore(target_client, backup_dir, target_ctx)
         logger.info(f"Restore of {target}: {target_ctx.changes.summary()}")
         changelogs.append(target_ctx.changes)
     return changelogs
 
 
-def process_mirror_deletions(config, source_client, backup_dir, targets, ctx):
+def process_mirror_deletions(config, source_client, backup_dir, targets, ctx,
+                             registry=None):
+    registry = registry if registry is not None else RESOURCE_REGISTRY
     logger.info("Mirror Deletions started")
     target_clients = {target: config.client(target) for target in targets}
     changelogs = {
@@ -79,7 +108,7 @@ def process_mirror_deletions(config, source_client, backup_dir, targets, ctx):
     # Reverse registry order: dashboards before folders. Deleting a folder
     # cascades into everything inside it, including target-only dashboards
     # that are explicitly not supposed to be removed.
-    for resource in reversed(RESOURCE_REGISTRY):
+    for resource in reversed(registry):
         diff = resource.diff_local_and_online(source_client, backup_dir)
         if not diff:
             continue

@@ -1,17 +1,38 @@
 # Example configuration - copy and fill in. Never commit real tokens.
+#
+# Any string value may reference an environment variable as ${VAR}, so a
+# config file that lives in git never has to contain a secret.
 instances:
   prod:
     url: https://grafana.example.com
-    token: tokenstring
-  test:
-    url: https://grafana-test.example.com
-    token: tokenstring
   qs:
     url: https://grafana-qs.example.com
-    token: tokenstring
+
+  # An instance behind an OIDC gateway (Keycloak + Ambassador). The gateway
+  # validates the access token before the request reaches Grafana, so a
+  # Grafana service account token alone is not enough.
+  test:
+    url: https://grafana.dev.hochbahn.cloud
+    auth:
+      type: oidc
+      token_url: https://id.hochbahn.cloud/realms/mosaic-operations-tools/protocol/openid-connect/token
+      client_id: grafana-dev
+      # Or set GRAFANA_OIDC_SECRET_OLD instead of putting it here.
+      client_secret: ${KEYCLOAK_CLIENT_SECRET}
+      # Optional; defaults to client_credentials.
+      # grant_type: client_credentials
+      # scope: openid
+      # audience: grafana
+      # Anything else the token endpoint needs, e.g. for token exchange:
+      # extra_params:
+      #   subject_token: ${CI_JOB_JWT_V2}
+      #   subject_token_type: urn:ietf:params:oauth:token-type:jwt
+    # Optional static headers, if the gateway wants more than the token.
+    # headers:
+    #   X-Forwarded-Email: grafanaut@example.com
 
 # Root directory for the JSON backups. Each source gets its own subdirectory.
-backup_dir: /somewhere/in/git/grafana-backup
+backup_dir: ./grafana-backup
 
 # How synced objects are marked and protected in the target instances.
 sync:
@@ -21,7 +42,7 @@ sync:
   # For users to still be able to edit without saving, set
   #   [users] viewers_can_edit = true
   # in grafana.ini on the target instances.
-  lock_folders: true
+  lock_folders: false
 
   # Set to false to write "editable": false into every restored dashboard.
   # This removes the edit and save controls for EVERYONE including admins,
@@ -30,14 +51,33 @@ sync:
   # via Settings -> JSON Model or the API. Every run puts it back to false.
   dashboards_editable: true
 
+  # Alerting resources are written through the provisioning API, which marks
+  # them as provisioned and read-only in the UI. true sends
+  # X-Disable-Provenance so they stay editable like hand-made ones.
+  alerting_editable: true
+
   # Visible markers. Set to an empty value to disable a single one.
   # {source} is replaced with the source instance name.
-  folder_title_suffix: " [synced]"
-  folder_description: "Managed by grafanaut, synced from {source}. Local changes are overwritten."
-  dashboard_tag: "synced:{source}"
+#  folder_title_suffix: " [synced]"
+#  folder_description: "Managed by grafanaut, synced from {source}. Local changes are overwritten."
+#  dashboard_tag: "synced:{source}"
 
 # Name collisions (a same-named object that exists only in the target) are
 # always refused and reported, there is nothing to configure. See README.
 
+# Alerting. Off by default, because turning it on changes what a run touches.
+# --alerting / --no-alerting override this for a single run.
+alerting:
+  # true enables alert rules, contact points, mute timings and templates.
+  enabled: true
 
+  # Each resource can also be set on its own, with or without `enabled`.
+  # alert_rules: true
+  # contact_points: true
+  # mute_timings: true
+  # templates: true
 
+  # The notification policy tree is NOT included by `enabled: true` and has to
+  # be asked for by name. It is a single global object: PUT replaces the whole
+  # tree, so every route that exists only in the target is lost.
+  # notification_policy: true

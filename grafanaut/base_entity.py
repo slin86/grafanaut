@@ -127,11 +127,15 @@ class BaseEntity(ABC):
         if ctx.dry_run:
             ctx.record(self.name(), action, name, detail)
             return
-        if action == changes.UPDATE:
-            body, response = client.put(path, entity)
-        else:
-            body, response = client.post(self.endpoint(), entity)
+        body, response = self.write(client, entity, path, action, ctx)
         self.record_result(ctx, response, body, entity, action, name, detail, "restoring")
+
+    def write(self, client, entity, path, action, ctx):
+        """Perform the actual write. Overridden where extra headers or a
+        different endpoint choice are needed (see the alerting resources)."""
+        if action == changes.UPDATE:
+            return client.put(path, entity)
+        return client.post(self.endpoint(), entity)
 
     def describe_difference(self, current, desired):
         """Return a short description of what differs, or None when the object

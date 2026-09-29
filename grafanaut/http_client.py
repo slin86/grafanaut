@@ -4,6 +4,9 @@ The important behavioural rule lives in exists(): only a 404 means "this
 object is gone". Every other error status raises, because exists() drives
 the deletion logic in mirror-deletions mode -- a 403 or a 500 that silently
 returned False would delete live dashboards in the target instances.
+
+Authentication comes from a token provider (see grafanaut.auth), so an OIDC
+access token that expires mid-run is refetched transparently.
 """
 
 from __future__ import annotations
@@ -11,6 +14,11 @@ from __future__ import annotations
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from grafanaut.auth import StaticTokenProvider
+from grafanaut.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 DEFAULT_TIMEOUT = 30
 
@@ -23,12 +31,16 @@ class GrafanaApiError(RuntimeError):
 
 
 class GrafanaClient:
-    def __init__(self, url, token, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, url, token=None, timeout=DEFAULT_TIMEOUT,
+                 token_provider=None, extra_headers=None):
         self.url = url.rstrip("/")
         self.timeout = timeout
+        # A plain token string is still accepted, mostly so tests and callers
+        # that do not care about OIDC stay simple.
+        self.token_provider = token_provider or StaticTokenProvider(token)
+        self.extra_headers = dict(extra_headers or {})
         self.session = requests.Session()
         self.session.headers.update({
-            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
@@ -42,9 +54,28 @@ class GrafanaClient:
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
         self.session.mount("http://", HTTPAdapter(max_retries=retry))
 
-    def _request(self, method, path, data=None):
+    def _request(self, method, path, data=None, headers=None):
+        """Send the request, retrying once on 401 with a freshly fetched token.
+
+        A gateway in front of Grafana rejects an expired OIDC token with 401.
+        Refetching once turns that into a hiccup instead of a failed run; a
+        static token cannot be refreshed, so it is not retried.
+        """
+        response = self._send(method, path, data, headers)
+        if response.status_code == 401 and self.token_provider.invalidate():
+            logger.info(f"Got 401 on {method} {path}, retrying with a fresh token")
+            response = self._send(method, path, data, headers)
+        return response
+
+    def _send(self, method, path, data, headers):
+        merged = {
+            "Authorization": f"Bearer {self.token_provider.token()}",
+            **self.extra_headers,
+            **(headers or {}),
+        }
         return self.session.request(
-            method, f"{self.url}{path}", json=data, timeout=self.timeout
+            method, f"{self.url}{path}", json=data,
+            headers=merged, timeout=self.timeout,
         )
 
     def exists(self, path):
@@ -66,16 +97,16 @@ class GrafanaClient:
             raise GrafanaApiError("GET", path, response.status_code, response.text)
         return response.json()
 
-    def post(self, path, data):
-        response = self._request("POST", path, data)
+    def post(self, path, data, headers=None):
+        response = self._request("POST", path, data, headers)
         return _body(response), response
 
-    def put(self, path, data):
-        response = self._request("PUT", path, data)
+    def put(self, path, data, headers=None):
+        response = self._request("PUT", path, data, headers)
         return _body(response), response
 
-    def delete(self, path):
-        response = self._request("DELETE", path)
+    def delete(self, path, headers=None):
+        response = self._request("DELETE", path, headers=headers)
         return _body(response), response
 
 

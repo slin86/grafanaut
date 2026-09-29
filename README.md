@@ -9,9 +9,12 @@ from Grafana 11+) and data sources, stored as git-friendly JSON.
 ## Features
 
 - Backup, deletion mirroring and restore of dashboards, folders and data sources
+- Optional alerting support: alert rules, contact points, mute timings,
+  notification templates and the notification policy tree
 - Full nested folder support: the whole tree is walked, including empty folders
 - Renames and re-parenting of both folders and dashboards are propagated
 - Synced folders are locked read-only in the targets and visibly marked
+- Static Grafana tokens or OIDC (Keycloak), for instances behind a gateway
 - Config-driven (one source, several targets)
 - `--dry-run` for previewing a run
 - Non-zero exit code when anything failed, so CI turns red
@@ -42,6 +45,9 @@ pip install -e .
 Tokens need admin privileges. They can also come from the environment:
 `GRAFANA_TOKEN_PROD`, `GRAFANA_TOKEN_QS`, `GRAFANA_TOKEN_TEST` (the env
 variable wins over the config file).
+
+Any string in the config may reference an environment variable as `${VAR}`, so
+a config file kept in git never has to contain a secret.
 
 See `config.yaml` in this repository for a commented example. The path can be
 overridden with `--config` or the `GRAFANAUT_CONFIG` environment variable.
@@ -121,6 +127,114 @@ is saved (schema migrations, panel defaults). A dashboard imported from an
 older schema version can therefore report differing fields even when nothing
 meaningful changed. The folder comparison is exact, the field list is a strong
 hint rather than a guarantee.
+
+---
+
+## Authentication
+
+Each instance picks its own mode in the `auth:` block.
+
+### Static token (default)
+
+A Grafana service account token, from the config or from
+`GRAFANA_TOKEN_<STAGE>`. This is what a plain `token:` line means.
+
+### OIDC (`type: oidc`)
+
+For an instance behind a gateway such as Ambassador that validates a Keycloak
+token before the request reaches Grafana. Grafanaut fetches an access token
+from the token endpoint and sends it as the bearer token:
+
+```yaml
+instances:
+  old:
+    url: https://grafana-old.example.com
+    auth:
+      type: oidc
+      token_url: https://keycloak.example.com/realms/<realm>/protocol/openid-connect/token
+      client_id: grafanaut
+      client_secret: ${KEYCLOAK_CLIENT_SECRET}   # or GRAFANA_OIDC_SECRET_OLD
+```
+
+The token is cached and refetched shortly before it expires, and a `401` is
+retried once with a fresh token, so a long restore does not die halfway
+through. A static token is never retried, since there is nothing to refresh.
+
+`grant_type` defaults to `client_credentials`. Because `scope`, `audience` and
+`extra_params` are passed through verbatim, other flows work without code
+changes — for example RFC 8693 token exchange with a GitLab CI id token:
+
+```yaml
+      grant_type: urn:ietf:params:oauth:grant-type:token-exchange
+      audience: grafana
+      extra_params:
+        subject_token: ${CI_JOB_JWT_V2}
+        subject_token_type: urn:ietf:params:oauth:token-type:jwt
+```
+
+A failed token request logs the provider's `error` and `error_description` and
+never the request body, so the client secret stays out of the CI log.
+
+Whichever mode is used, the token still needs admin privileges **in Grafana**:
+getting past the gateway is not the same as being allowed to write.
+
+---
+
+## Alerting
+
+Off by default. `enabled: true` in the `alerting:` block turns on alert rules,
+contact points, mute timings and notification templates; each can also be set
+on its own. `--alerting` and `--no-alerting` override the config for a single
+run, which is what a one-off import from another instance needs:
+
+```bash
+grafanaut --mode backup --source old --alerting
+grafanaut --mode restore --source old --targets test --alerting --dry-run
+```
+
+Restore order is dependency-driven: contact points and templates first, then
+mute timings, then alert rules (which need their folder to exist), and the
+policy tree last.
+
+### Editability
+
+Resources written through the provisioning API are marked as provisioned and
+become **read-only in the Grafana UI**. `sync.alerting_editable: true` (the
+default) sends `X-Disable-Provenance: true` so they behave like hand-made
+rules. Setting it to `false` leaves them locked, which also closes the gap
+where an editor can still change alert rules inside a folder whose permissions
+are otherwise read-only.
+
+### Contact point secrets
+
+Grafana never exports contact point secrets — webhook URLs, tokens, passwords
+come back as `[REDACTED]`. Writing that placeholder back would store the
+literal string as the credential, so grafanaut strips those fields and lists
+what has to be set by hand in the target:
+
+```
+[WARNING] 	1 contact point(s) have secrets that Grafana does not export.
+          Set them manually in the target:
+[WARNING] 		Ops Slack: url
+```
+
+Everything else about the contact point is restored, so this is a one-time
+manual step per secret, not per run. The warning repeats on later runs because
+grafanaut cannot tell whether the secret was filled in.
+
+### Notification policy tree
+
+Deliberately **not** included by `enabled: true`; it needs
+`notification_policy: true`. Unlike every other resource it is a single global
+object, and `PUT /api/v1/provisioning/policies` replaces the whole tree — any
+route that exists only in the target is gone afterwards. When it does run, the
+replacement is logged as a warning.
+
+### Not covered
+
+Data-source-managed (Mimir/Loki) alert rules go through a different API and are
+not handled. Alert rule *state* (silences, current firing state) is runtime
+data and is not backed up.
 
 ---
 

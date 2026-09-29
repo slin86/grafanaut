@@ -4,3 +4,7 @@ grafanaut.egg-info
 venv
 git_status.txt
 git_changes.md
+__pycache__/
+*.py[cod]
+.pytest_cache/
+changes.json
