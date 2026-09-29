@@ -7,29 +7,31 @@ instances:
     url: https://grafana.example.com
   qs:
     url: https://grafana-qs.example.com
+  test:
+    url: https://grafana-test.example.com
 
   # An instance behind an OIDC gateway (Keycloak + Ambassador). The gateway
   # validates the access token before the request reaches Grafana, so a
   # Grafana service account token alone is not enough.
-  test:
-    url: https://grafana.dev.hochbahn.cloud
-    auth:
-      type: oidc
-      token_url: https://id.hochbahn.cloud/realms/mosaic-operations-tools/protocol/openid-connect/token
-      client_id: grafana-dev
-      # Or set GRAFANA_OIDC_SECRET_OLD instead of putting it here.
-      client_secret: ${KEYCLOAK_CLIENT_SECRET}
-      # Optional; defaults to client_credentials.
-      # grant_type: client_credentials
-      # scope: openid
-      # audience: grafana
-      # Anything else the token endpoint needs, e.g. for token exchange:
-      # extra_params:
-      #   subject_token: ${CI_JOB_JWT_V2}
-      #   subject_token_type: urn:ietf:params:oauth:token-type:jwt
-    # Optional static headers, if the gateway wants more than the token.
-    # headers:
-    #   X-Forwarded-Email: grafanaut@example.com
+#  test:
+#    url: https://grafana-test.example.com
+#    auth:
+#      type: oidc
+#      token_url: https://id.example.com/realms/example-realm-name/protocol/openid-connect/token
+#      client_id: grafana-dev
+#      # Or set GRAFANA_OIDC_SECRET_OLD instead of putting it here.
+#      client_secret: ${KEYCLOAK_CLIENT_SECRET}
+#      # Optional; defaults to client_credentials.
+#      # grant_type: client_credentials
+#      # scope: openid
+#      # audience: grafana
+#      # Anything else the token endpoint needs, e.g. for token exchange:
+#      # extra_params:
+#      #   subject_token: ${CI_JOB_JWT_V2}
+#      #   subject_token_type: urn:ietf:params:oauth:token-type:jwt
+#    # Optional static headers, if the gateway wants more than the token.
+#    # headers:
+#    #   X-Forwarded-Email: grafanaut@example.com
 
 # Root directory for the JSON backups. Each source gets its own subdirectory.
 backup_dir: ./grafana-backup
