@@ -6,9 +6,10 @@ import os
 
 import yaml
 
+from grafanaut.auth import build_provider, expand
 from grafanaut.http_client import GrafanaClient
 from grafanaut.logger import setup_logger
-from grafanaut.sync_policy import SyncPolicy
+from grafanaut.sync_policy import AlertingPolicy, SyncPolicy
 
 logger = setup_logger(__name__)
 
@@ -17,10 +18,11 @@ DEFAULT_BACKUP_DIR = "backup"
 
 
 class GrafanautConfig:
-    def __init__(self, instances, backup_dir, sync):
+    def __init__(self, instances, backup_dir, sync, alerting):
         self.instances = instances
         self.backup_dir = backup_dir
         self.sync = sync
+        self.alerting = alerting
 
     @classmethod
     def load(cls, path=None, source=None, targets=None):
@@ -32,6 +34,7 @@ class GrafanautConfig:
             # backup_dir was documented in the README but previously ignored.
             backup_dir=raw.get("backup_dir") or DEFAULT_BACKUP_DIR,
             sync=SyncPolicy.from_dict(raw.get("sync")),
+            alerting=AlertingPolicy.from_dict(raw.get("alerting")),
         )
         config.validate(source, targets)
         return config
@@ -53,16 +56,25 @@ class GrafanautConfig:
                 raise RuntimeError(f"Grafanaut: '{target}' is both source and target")
 
     def get_token(self, stage):
-        env_var = f"GRAFANA_TOKEN_{stage.upper()}"
-        token = os.environ.get(env_var) or self.instances[stage].get("token")
-        if not token:
-            raise RuntimeError(
-                f"Grafanaut: No token for '{stage}' (set {env_var} or config.yaml)"
-            )
-        return token
+        """The current bearer token for an instance.
+
+        Kept for callers that only want the token; the client itself holds the
+        provider so an OIDC token can be refreshed mid-run.
+        """
+        return build_provider(stage, self.instances[stage]).token()
 
     def client(self, stage):
-        return GrafanaClient(self.instances[stage]["url"], self.get_token(stage))
+        settings = self.instances[stage]
+        if not settings.get("url"):
+            raise RuntimeError(f"Grafanaut: no url configured for '{stage}'")
+        return GrafanaClient(
+            expand(settings["url"]),
+            token_provider=build_provider(stage, settings),
+            extra_headers={
+                key: expand(value)
+                for key, value in (settings.get("headers") or {}).items()
+            },
+        )
 
     def backup_dir_for(self, source):
         return os.path.join(self.backup_dir, source)
