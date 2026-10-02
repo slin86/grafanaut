@@ -1,11 +1,20 @@
 """Authentication against Grafana.
 
-Two modes, chosen per instance in config.yaml:
+Three modes, chosen per instance in config.yaml:
 
 * ``token`` - a Grafana service account token, sent as a static bearer token.
 * ``oidc``  - an access token fetched from an OIDC provider such as Keycloak.
               Needed when Grafana sits behind a gateway (Ambassador) that
               validates the token before the request reaches Grafana at all.
+* ``none``  - no bearer token at all. For an instance where neither a service
+              account nor an OIDC client can be created (no rights on someone
+              else's Grafana, an unhelpful old provider, ...). Pair it with
+              ``headers:`` on the instance, set to a Cookie (and, if the
+              gateway needs it, an X-XSRF-Token) copied from a logged-in
+              browser session. Picks up whatever that browser user is allowed
+              to see -- fine for a one-off read-only export, not a substitute
+              for ``token``/``oidc`` anywhere those can be set up, since a
+              browser session expires and carries a person's own permissions.
 
 The OIDC side is deliberately generic: grant type, scope, audience and extra
 form parameters all come from the configuration. That covers the client
@@ -51,6 +60,21 @@ class StaticTokenProvider:
 
     def invalidate(self):
         """Nothing to refresh - a static token stays wrong if it is wrong."""
+        return False
+
+
+class NoTokenProvider:
+    """No bearer token. Auth is expected to ride entirely on extra_headers
+    (typically a Cookie from a logged-in browser session, via a gateway that
+    checks the session cookie before the request reaches Grafana)."""
+
+    kind = "none"
+
+    def token(self):
+        return None
+
+    def invalidate(self):
+        """Nothing to refresh - there is no token to begin with."""
         return False
 
 
@@ -131,6 +155,9 @@ def build_provider(stage, settings):
                 f"(set GRAFANA_TOKEN_{stage.upper()} or token in config.yaml)"
             )
         return StaticTokenProvider(token)
+
+    if kind == "none":
+        return NoTokenProvider()
 
     if kind == "oidc":
         missing = [key for key in ("token_url", "client_id") if not auth.get(key)]

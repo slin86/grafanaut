@@ -68,11 +68,11 @@ class GrafanaClient:
         return response
 
     def _send(self, method, path, data, headers):
-        merged = {
-            "Authorization": f"Bearer {self.token_provider.token()}",
-            **self.extra_headers,
-            **(headers or {}),
-        }
+        merged = dict(self.extra_headers)
+        token = self.token_provider.token()
+        if token:
+            merged["Authorization"] = f"Bearer {token}"
+        merged.update(headers or {})
         return self.session.request(
             method, f"{self.url}{path}", json=data,
             headers=merged, timeout=self.timeout,
